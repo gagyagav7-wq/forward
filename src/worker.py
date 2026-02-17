@@ -1,87 +1,111 @@
-import os, asyncio, subprocess
+import os, asyncio, subprocess, json, math
 from telethon import TelegramClient, functions, types
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.prompt import Prompt, IntPrompt
 from .utils import console, fix_id
 from .history import is_processed, save_to_history
 
-# --- 1. JURUS CUCI VIDEO (REMUX) ---
-# Ini biar durasi & gambar muncul otomatis tanpa ribet
+# --- 1. CEK DURASI VIDEO (Buat nentuin posisi tengah) ---
+def get_video_duration(video_path):
+    try:
+        # Pake ffprobe buat baca metadata durasi
+        cmd = [
+            'ffprobe', 
+            '-v', 'error', 
+            '-show_entries', 'format=duration', 
+            '-of', 'default=noprint_wrappers=1:nokey=1', 
+            video_path
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return float(result.stdout.strip())
+    except:
+        return 5.0 # Default tembak detik ke-5 kalo gagal baca
+
+# --- 2. GENERATE THUMBNAIL (DI TENGAH VIDEO) ---
+def generate_smart_thumbnail(video_path):
+    thumb_path = f"{video_path}.jpg"
+    try:
+        # Cari titik tengah
+        duration = get_video_duration(video_path)
+        mid_point = duration / 2
+        
+        # Kalau video pendek (< 2 detik), ambil di awal aja
+        if duration < 2: mid_point = 0.5
+        
+        # Format timestamp HH:MM:SS
+        ss_time = str(mid_point)
+
+        # Command FFmpeg: Ambil gambar di titik tengah, Resize lebar 320px (Standar Telegram)
+        cmd = [
+            'ffmpeg', '-y', '-v', 'error',
+            '-ss', ss_time,         # Loncat ke tengah
+            '-i', video_path, 
+            '-vframes', '1', 
+            '-vf', 'scale=320:-1',  # Resize biar enteng & valid
+            '-q:v', '2',            # Kualitas JPG
+            thumb_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        if os.path.exists(thumb_path):
+            file_size = os.path.getsize(thumb_path)
+            if file_size > 0: return thumb_path
+    except Exception as e:
+        console.print(f"[red]Gagal Thumb: {e}[/red]")
+    return None
+
+# --- 3. JURUS CUCI VIDEO (REMUX) ---
 def clean_video(input_path):
     output_path = f"{input_path}_clean.mp4"
     try:
-        # Command FFmpeg: -c copy (Salin doang, ga convert, jadi CEPET BANGET)
-        # -movflags +faststart (Pindahin metadata ke depan biar Telegram seneng)
         cmd = [
-            'ffmpeg', '-y', 
-            '-v', 'error',
+            'ffmpeg', '-y', '-v', 'error',
             '-i', input_path, 
             '-c', 'copy', 
             '-movflags', '+faststart',
             output_path
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        if os.path.exists(output_path):
-            return output_path
-    except:
-        pass
-    return input_path # Kalo gagal, pake file asli aja
-
-# --- 2. GENERATE SAMPUL (THUMBNAIL) ---
-def generate_thumbnail(video_path):
-    thumb_path = f"{video_path}.jpg"
-    try:
-        # Ambil gambar di detik ke-1
-        cmd = [
-            'ffmpeg', '-y', '-v', 'error',
-            '-i', video_path, 
-            '-ss', '00:00:01', 
-            '-vframes', '1', 
-            thumb_path
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if os.path.exists(thumb_path): return thumb_path
+        if os.path.exists(output_path): return output_path
     except: pass
-    return None
+    return input_path
 
-# --- 3. KIRIM ALBUM ---
+# --- 4. KIRIM ALBUM ---
 async def send_batch(client, dst_ent, batch_msgs, batch_files, batch_thumbs, target_topic_id, src_id):
     if not batch_files: return
     try:
         caption = batch_msgs[0].text or ""
         
-        # Kirim Album dengan File yang sudah dicuci + Thumbnail
         await client.send_file(
             dst_ent,
             file=batch_files,
             caption=caption,
-            thumb=batch_thumbs,
+            thumb=batch_thumbs,      # Thumbnail dari tengah video
             reply_to=target_topic_id,
-            supports_streaming=True
+            supports_streaming=True,
+            force_document=False 
         )
 
-        # Catat History
         for msg in batch_msgs: save_to_history(src_id, msg.id)
 
     except Exception as e:
         console.print(f"[red]Gagal Kirim Album: {e}[/red]")
     finally:
-        # Hapus semua file sampah (Asli, Clean, Thumb)
+        # Hapus Sampah
         for f in batch_files:
             if f and os.path.exists(f): os.remove(f)
-            # Hapus file asli yg sebelum dicuci (karena namanya beda)
             original = f.replace("_clean.mp4", "")
             if os.path.exists(original): os.remove(original)
-            
         for t in batch_thumbs:
             if t and os.path.exists(t): os.remove(t)
 
 async def start_transit(client: TelegramClient):
-    # --- SETUP AREA ---
-    console.print(f"[bold cyan]--- SETUP AREA ---[/bold cyan]")
+    # --- SETUP ---
+    console.print(f"[bold cyan]--- SETUP SUMBER ---[/bold cyan]")
     src_id = fix_id(Prompt.ask("ID Grup ASAL"))
     topic_id = IntPrompt.ask("ID Topik ASAL (0=None)", default=0)
+    
+    console.print(f"\n[bold cyan]--- SETUP TUJUAN ---[/bold cyan]")
     dst_id = fix_id(Prompt.ask("ID Grup TUJUAN"))
     
     mode_topik = Prompt.ask("Topik Tujuan: 1.ID Manual | 2.Cari Nama | 3.General", choices=["1", "2", "3"], default="1")
@@ -113,7 +137,7 @@ async def start_transit(client: TelegramClient):
     # --- BATCH VARS ---
     batch_msgs = []; batch_files = []; batch_thumbs = []; current_type = None
 
-    console.print(f"\n[bold yellow]🚀 GASKEUN CLEAN & REMUX![/bold yellow]")
+    console.print(f"\n[bold yellow]🚀 GASKEUN SMART THUMBNAIL![/bold yellow]")
     
     with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}[/cyan]"), BarColumn(), console=console) as prg:
         task = prg.add_task("Standby...", total=None)
@@ -122,7 +146,7 @@ async def start_transit(client: TelegramClient):
             
             if resume_mode == "y" and is_processed(src_id, msg.id): continue
 
-            # Detect Type
+            # Detect
             msg_type = None
             if hasattr(msg, 'video') and msg.video: msg_type = 'video'
             elif hasattr(msg, 'photo') and msg.photo: msg_type = 'photo'
@@ -131,7 +155,7 @@ async def start_transit(client: TelegramClient):
             if mode_file == "1" and msg_type != 'video': continue
             if mode_file == "2" and msg_type != 'photo': continue
 
-            # SEND BATCH IF FULL
+            # SEND BATCH
             if len(batch_msgs) >= 10 or (current_type and current_type != msg_type):
                 prg.update(task, description=f"Mengirim Album ({len(batch_msgs)})...")
                 await send_batch(client, dst_ent, batch_msgs, batch_files, batch_thumbs, target_topic_id, src_id)
@@ -143,24 +167,25 @@ async def start_transit(client: TelegramClient):
             # 1. DOWNLOAD
             path = await client.download_media(msg)
             
-            # 2. PROSES VIDEO (CUCI & THUMB)
+            # 2. PROSES
             final_path = path
             thumb_path = None
             
             if path and msg_type == 'video':
-                # Cuci Video (Remux)
+                # Bersihin Metadata
                 final_path = clean_video(path)
-                # Bikin Sampul Baru
-                thumb_path = generate_thumbnail(final_path)
+                # Bikin Thumbnail di TENGAH Video
+                thumb_path = generate_smart_thumbnail(final_path)
             
             if final_path:
                 batch_msgs.append(msg)
                 batch_files.append(final_path)
                 batch_thumbs.append(thumb_path)
 
-        # KIRIM SISA
+        # SISA
         if batch_msgs:
             prg.update(task, description=f"Mengirim sisa ({len(batch_msgs)})...")
             await send_batch(client, dst_ent, batch_msgs, batch_files, batch_thumbs, target_topic_id, src_id)
 
     console.print("[green]✅ DONE![/green]")
+            
