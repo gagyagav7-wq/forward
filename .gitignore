@@ -1,0 +1,5 @@
+data/sessions/
+data/*.json
+data/*.session
+__pycache__/
+*.log
