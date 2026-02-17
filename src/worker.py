@@ -5,13 +5,46 @@ from rich.prompt import Prompt, IntPrompt
 from .utils import console, fix_id
 from .history import is_processed, save_to_history
 
+# --- FUNGSI KIRIM ALBUM ---
+async def send_batch(client, dst_ent, batch_msgs, batch_files, batch_thumbs, batch_attrs, target_topic_id, src_id):
+    if not batch_files: return
+
+    try:
+        # Ambil caption dari pesan pertama aja (biar ga kepanjangan)
+        caption = batch_msgs[0].text or ""
+        
+        # PROSES UPLOAD ALBUM
+        # force_document=False biar jadi galeri (bukan file dokumen)
+        await client.send_file(
+            dst_ent,
+            file=batch_files,
+            caption=caption,
+            thumb=batch_thumbs,
+            attributes=batch_attrs,
+            reply_to=target_topic_id,
+            supports_streaming=True,
+            force_document=False 
+        )
+
+        # CATAT HISTORY (Semua item di batch dianggap sukses)
+        for msg in batch_msgs:
+            save_to_history(src_id, msg.id)
+
+    except Exception as e:
+        console.print(f"[red]Gagal Kirim Album: {e}[/red]")
+    finally:
+        # BERSIH-BERSIH SAMPAH
+        for f in batch_files:
+            if f and os.path.exists(f): os.remove(f)
+        for t in batch_thumbs:
+            if t and os.path.exists(t): os.remove(t)
+
 async def start_transit(client: TelegramClient):
-    # --- 1. SETUP SOURCE ---
+    # --- 1. SETUP ---
     console.print(f"[bold cyan]--- PENGATURAN SUMBER ---[/bold cyan]")
     src_id = fix_id(Prompt.ask("ID Grup ASAL"))
     topic_id = IntPrompt.ask("ID Topik ASAL (0 jika tidak ada)", default=0)
 
-    # --- 2. SETUP DESTINATION ---
     console.print(f"\n[bold cyan]--- PENGATURAN TUJUAN ---[/bold cyan]")
     dst_id = fix_id(Prompt.ask("ID Grup TUJUAN"))
     
@@ -23,7 +56,6 @@ async def start_transit(client: TelegramClient):
     dst_ent = await client.get_input_entity(dst_id)
 
     if mode_topik == "1":
-        console.print("[dim]Tips: Link https://t.me/c/123/456/99 -> ID Topik: 456[/dim]")
         target_topic_id = IntPrompt.ask("Masukkan ID Topik")
     elif mode_topik == "2":
         try:
@@ -39,7 +71,10 @@ async def start_transit(client: TelegramClient):
                     target_topic_id = IntPrompt.ask("ID Topik")
         except: pass
 
-    # --- 3. FILTER & SETTINGS ---
+    # --- SETTINGS ---
+    console.print("\n[bold]MODE ALBUM (GROUPING)[/bold]")
+    console.print("Maksimal 10 item per album (Aturan Telegram).")
+    
     console.print("\n1. Video | 2. Foto | 3. Semua")
     mode_file = Prompt.ask("Tipe File", choices=["1", "2", "3"], default="1")
     resume_mode = Prompt.ask("Lanjut (Anti-Duplikat)?", choices=["y", "n"], default="y")
@@ -54,59 +89,75 @@ async def start_transit(client: TelegramClient):
     
     src_ent = await client.get_input_entity(src_id)
 
-    console.print(f"\n[bold yellow]🚀 GASKEUN![/bold yellow]")
+    # --- KERANJANG BELANJA (BATCH) ---
+    batch_msgs = []
+    batch_files = []
+    batch_thumbs = []
+    batch_attrs = []
+    current_type = None # 'video' atau 'photo'
+
+    console.print(f"\n[bold yellow]🚀 GASKEUN MODE ALBUM![/bold yellow]")
     
-    # --- 4. EKSEKUSI ---
-    async for msg in client.iter_messages(src_ent, reply_to=topic_id if topic_id > 0 else None, filter=m_filter, reverse=is_reverse):
-        try:
+    with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}[/cyan]"), BarColumn(), console=console) as prg:
+        task = prg.add_task("Mencari file...", total=None)
+        
+        async for msg in client.iter_messages(src_ent, reply_to=topic_id if topic_id > 0 else None, filter=m_filter, reverse=is_reverse):
+            
+            # 1. SKIP CHECK
             if resume_mode == "y" and is_processed(src_id, msg.id):
-                console.print(f"[dim]⏩ Skip {msg.id}[/dim]")
                 continue
 
-            valid = False
-            if mode_file == "3":
-                if (hasattr(msg, 'video') and msg.video) or (hasattr(msg, 'photo') and msg.photo): valid = True
-            else: valid = True
+            # 2. TENTUKAN TIPE FILE SAAT INI
+            msg_type = None
+            if hasattr(msg, 'video') and msg.video: msg_type = 'video'
+            elif hasattr(msg, 'photo') and msg.photo: msg_type = 'photo'
+            
+            if not msg_type: continue # Skip text doang
+            
+            # Filter User Request (Misal cuma mau video)
+            if mode_file == "1" and msg_type != 'video': continue
+            if mode_file == "2" and msg_type != 'photo': continue
 
-            if valid:
-                with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}[/cyan]"), BarColumn(), console=console) as prg:
-                    task = prg.add_task(f"Moving {msg.id}...", total=None)
-                    
-                    # 1. AMBIL ATRIBUT (Durasi, Lebar, Tinggi)
-                    my_attributes = []
-                    if msg.media and hasattr(msg.media, 'document') and hasattr(msg.media.document, 'attributes'):
-                        my_attributes = msg.media.document.attributes
+            # 3. LOGIC GANTI BATCH (Kirim kalau Penuh atau Beda Tipe)
+            # Kalau keranjang penuh (10) ATAU tipe file berubah (misal dari Foto ke Video)
+            if len(batch_msgs) >= 10 or (current_type and current_type != msg_type):
+                prg.update(task, description=f"Mengirim Album ({len(batch_msgs)} items)...")
+                await send_batch(client, dst_ent, batch_msgs, batch_files, batch_thumbs, batch_attrs, target_topic_id, src_id)
+                
+                # Kosongkan Keranjang
+                batch_msgs = []
+                batch_files = []
+                batch_thumbs = []
+                batch_attrs = []
+                current_type = None
 
-                    # 2. DOWNLOAD VIDEO
-                    path = await client.download_media(msg)
-                    
-                    # 3. DOWNLOAD THUMBNAIL (INI PERUBAHANNYA)
-                    # Kita download gambar sampulnya secara terpisah
-                    thumb_path = await client.download_media(msg, thumb=-1)
+            # 4. MASUKIN KERANJANG (Download dulu)
+            current_type = msg_type
+            prg.update(task, description=f"Download ID {msg.id} ({len(batch_msgs)+1}/10)...")
+            
+            # Download Media Utama
+            path = await client.download_media(msg)
+            
+            # Download Thumb & Ambil Atribut (Biar Video ga Gelap)
+            thumb_path = None
+            attrs = None
+            
+            if msg_type == 'video':
+                thumb_path = await client.download_media(msg, thumb=-1)
+                if msg.media and hasattr(msg.media, 'document'):
+                    attrs = msg.media.document.attributes
+            
+            # Simpan data ke list batch
+            if path:
+                batch_msgs.append(msg)
+                batch_files.append(path)
+                batch_thumbs.append(thumb_path) # Bisa None kalo foto
+                batch_attrs.append(attrs)       # Bisa None kalo foto
 
-                    if path:
-                        try:
-                            # 4. UPLOAD PAKET LENGKAP (Video + Thumb + Atribut)
-                            await client.send_file(
-                                dst_ent, 
-                                path, 
-                                caption=msg.text or "", 
-                                reply_to=target_topic_id,
-                                thumb=thumb_path,           # <--- TEMPEL SAMPULNYA DISINI
-                                attributes=my_attributes,   # <--- TEMPEL DURASINYA DISINI
-                                supports_streaming=True
-                            )
-                            save_to_history(src_id, msg.id)
-                            await asyncio.sleep(0.5) 
-                        except Exception as e:
-                            console.print(f"[red]Gagal: {e}[/red]")
-                        finally:
-                            # Bersihin Sampah (Video & Thumb)
-                            if os.path.exists(path): os.remove(path)
-                            if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
-                            
-        except Exception as e:
-            console.print(f"[red]Err {msg.id}: {e}[/red]")
+        # 5. KIRIM SISA KERANJANG (Di akhir loop)
+        if batch_msgs:
+            prg.update(task, description=f"Mengirim sisa album ({len(batch_msgs)} items)...")
+            await send_batch(client, dst_ent, batch_msgs, batch_files, batch_thumbs, batch_attrs, target_topic_id, src_id)
 
-    console.print("[green]✅ DONE![/green]")
-                    
+    console.print("[green]✅ SEMUA SELESAI BOSKU![/green]")
+    
