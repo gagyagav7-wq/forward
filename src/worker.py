@@ -15,7 +15,6 @@ async def start_transit(client: TelegramClient):
     console.print(f"\n[bold cyan]--- PENGATURAN TUJUAN ---[/bold cyan]")
     dst_id = fix_id(Prompt.ask("ID Grup TUJUAN"))
     
-    # SETUP TOPIK (Simpel Angka)
     console.print("\n[bold yellow]METODE TOPIK:[/bold yellow]")
     console.print("1. Manual ID\n2. Cari Nama\n3. General (No Topic)")
     mode_topik = Prompt.ask("Pilih", choices=["1", "2", "3"], default="1")
@@ -45,11 +44,10 @@ async def start_transit(client: TelegramClient):
     mode_file = Prompt.ask("Tipe File", choices=["1", "2", "3"], default="1")
     resume_mode = Prompt.ask("Lanjut (Anti-Duplikat)?", choices=["y", "n"], default="y")
     
-    console.print("1. Lama ke Baru (Eps 1->End)\n2. Baru ke Lama")
+    console.print("1. Lama ke Baru (Urut Episode)\n2. Baru ke Lama")
     urut = Prompt.ask("Urutan", choices=["1", "2"], default="1")
     is_reverse = True if urut == "1" else False
 
-    # Filter Logic
     m_filter = None
     if mode_file == "1": m_filter = types.InputMessagesFilterVideo()
     elif mode_file == "2": m_filter = types.InputMessagesFilterPhotos()
@@ -74,34 +72,41 @@ async def start_transit(client: TelegramClient):
                 with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}[/cyan]"), BarColumn(), console=console) as prg:
                     task = prg.add_task(f"Moving {msg.id}...", total=None)
                     
-                    # 1. AMBIL ATRIBUT ASLI (KTP VIDEO)
+                    # 1. AMBIL ATRIBUT (Durasi, Lebar, Tinggi)
                     my_attributes = []
                     if msg.media and hasattr(msg.media, 'document') and hasattr(msg.media.document, 'attributes'):
                         my_attributes = msg.media.document.attributes
 
-                    # 2. DOWNLOAD
+                    # 2. DOWNLOAD VIDEO
                     path = await client.download_media(msg)
                     
+                    # 3. DOWNLOAD THUMBNAIL (INI PERUBAHANNYA)
+                    # Kita download gambar sampulnya secara terpisah
+                    thumb_path = await client.download_media(msg, thumb=-1)
+
                     if path:
                         try:
-                            # 3. UPLOAD DENGAN ATRIBUT & STREAMING
+                            # 4. UPLOAD PAKET LENGKAP (Video + Thumb + Atribut)
                             await client.send_file(
                                 dst_ent, 
                                 path, 
                                 caption=msg.text or "", 
                                 reply_to=target_topic_id,
-                                attributes=my_attributes,   # <--- INI KUNCINYA
-                                supports_streaming=True     # <--- BIAR BISA DIPLAY LANGSUNG
+                                thumb=thumb_path,           # <--- TEMPEL SAMPULNYA DISINI
+                                attributes=my_attributes,   # <--- TEMPEL DURASINYA DISINI
+                                supports_streaming=True
                             )
                             save_to_history(src_id, msg.id)
                             await asyncio.sleep(0.5) 
                         except Exception as e:
                             console.print(f"[red]Gagal: {e}[/red]")
                         finally:
+                            # Bersihin Sampah (Video & Thumb)
                             if os.path.exists(path): os.remove(path)
+                            if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
                             
         except Exception as e:
             console.print(f"[red]Err {msg.id}: {e}[/red]")
 
     console.print("[green]✅ DONE![/green]")
-    
+                    
