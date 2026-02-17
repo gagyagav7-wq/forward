@@ -15,19 +15,25 @@ async def start_transit(client: TelegramClient):
     console.print(f"\n[bold cyan]--- PENGATURAN TUJUAN ---[/bold cyan]")
     dst_id = fix_id(Prompt.ask("ID Grup TUJUAN"))
     
-    # LOGIC FIX: PILIH MODE TOPIK
-    console.print("[dim]Tips: Masuk ke topik tujuan -> klik titik 3 -> Copy Link -> Angka terakhir adalah ID Topik[/dim]")
-    mode_topik = Prompt.ask("Mau kirim ke Topik mana?", choices=["1. Input Manual ID (Akurat)", "2. Cari via Nama", "3. Ke General (No Topic)"], default="1")
+    # --- MENU PILIHAN TOPIK (YANG TADI ERROR) ---
+    console.print("\n[bold yellow]PILIH METODE TOPIK:[/bold yellow]")
+    console.print("1. Input Manual ID (Paling Akurat)")
+    console.print("2. Cari via Nama Topik")
+    console.print("3. Kirim ke General (Tanpa Topik)")
+    
+    # Nah ini fix-nya, choices-nya angka doang
+    mode_topik = Prompt.ask("Pilih Angka", choices=["1", "2", "3"], default="1")
     
     target_topic_id = None
     dst_ent = await client.get_input_entity(dst_id)
 
     if mode_topik == "1":
-        # MODE 1: MANUAL ID (Paling Aman)
-        target_topic_id = IntPrompt.ask("Masukkan ID Topik Tujuan (Angka)")
+        # Tips cara nyari ID
+        console.print("[dim]Tips: Di Telegram, klik titik 3 di pojok kanan atas topik -> Copy Link.[/dim]")
+        console.print("[dim]Contoh Link: https://t.me/c/12345/123/999 -> ID Topiknya adalah 123[/dim]")
+        target_topic_id = IntPrompt.ask("Masukkan ID Topik (Angka)")
         
     elif mode_topik == "2":
-        # MODE 2: AUTO SEARCH (Sesuai Nama)
         try:
             full_channel = await client(functions.channels.GetFullChannelRequest(dst_ent))
             if full_channel.full_chat.forum:
@@ -57,22 +63,26 @@ async def start_transit(client: TelegramClient):
             target_topic_id = IntPrompt.ask("Masukkan ID Topik Manual aja")
             
     else:
-        # MODE 3: GENERAL
-        target_topic_id = None # None artinya kirim ke General
+        target_topic_id = None # Kirim ke General
 
     # --- 3. FILTER & SETTINGS ---
     console.print(f"\n[bold cyan]--- FILTER & SETTINGS ---[/bold cyan]")
-    resume_mode = Prompt.ask("Lanjut dari yg terakhir (Anti-Duplikat)?", choices=["y", "n"], default="y")
-    mode_file = Prompt.ask("Tipe File", choices=["1. Video", "2. Foto", "3. Semua"], default="1")
-    urut = Prompt.ask("Urutan Ambil", choices=["Lama ke Baru", "Baru ke Lama"], default="Lama ke Baru")
+    # Menu simpel angka
+    console.print("1. Video\n2. Foto\n3. Semua")
+    mode_file = Prompt.ask("Tipe File", choices=["1", "2", "3"], default="1")
     
-    # Setup Filter Telegram
+    resume_mode = Prompt.ask("Lanjut dari yg terakhir (Anti-Duplikat)?", choices=["y", "n"], default="y")
+    
+    console.print("1. Lama ke Baru (Urut Episode)\n2. Baru ke Lama")
+    urut_pilihan = Prompt.ask("Urutan Ambil", choices=["1", "2"], default="1")
+    is_reverse = True if urut_pilihan == "1" else False
+
+    # Setup Filter
     m_filter = None
-    if mode_file == "1. Video": m_filter = types.InputMessagesFilterVideo()
-    elif mode_file == "2. Foto": m_filter = types.InputMessagesFilterPhotos()
+    if mode_file == "1": m_filter = types.InputMessagesFilterVideo()
+    elif mode_file == "2": m_filter = types.InputMessagesFilterPhotos()
 
     src_ent = await client.get_input_entity(src_id)
-    is_reverse = True if urut == "Lama ke Baru" else False
 
     console.print(f"\n[bold yellow]🚀 GASKEUN! (Target Topik ID: {target_topic_id})[/bold yellow]")
     
@@ -84,9 +94,9 @@ async def start_transit(client: TelegramClient):
                 console.print(f"[dim]⏩ Skip ID {msg.id}[/dim]")
                 continue
 
-            # VALIDASI TIPE (Double Check)
+            # VALIDASI TIPE
             valid = False
-            if mode_file == "3. Semua":
+            if mode_file == "3":
                 if (hasattr(msg, 'video') and msg.video) or (hasattr(msg, 'photo') and msg.photo): valid = True
             else: valid = True
 
@@ -99,14 +109,12 @@ async def start_transit(client: TelegramClient):
                     
                     if path:
                         try:
-                            # INI KUNCINYA: parameter reply_to harus diisi target_topic_id
                             await client.send_file(
                                 dst_ent, 
                                 path, 
                                 caption=msg.text or "", 
                                 reply_to=target_topic_id 
                             )
-                            
                             save_to_history(src_id, msg.id)
                             await asyncio.sleep(0.5) 
                         except Exception as e:
